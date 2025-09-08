@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timetable-to-gcal"
+version = "0.1.0"
+description = "Парсер расписания .XLS (ПИА) с загрузкой в Google Calendar"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "You" }]
+license = { text = "MIT" }
+dependencies = [
+    "google-api-python-client>=2.130.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+    "python-dateutil>=2.9.0",
+    "pytz>=2024.1",
+    "xlrd==1.2.0",
+]
+
+[project.scripts]
+timetable-to-gcal = "timetable_gcal.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
