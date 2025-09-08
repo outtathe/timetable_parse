@@ -72,6 +72,7 @@ def build_event(hit: Hit, tz: str, upper_week_monday: dt.date, until_date: dt.da
     )
 
     xkey = make_xkey(hit)
+    summary = f"{summary} · {xkey}"
 
     return {
         "summary": summary,

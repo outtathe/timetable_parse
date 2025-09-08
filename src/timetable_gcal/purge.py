@@ -43,10 +43,10 @@ def fmt_when(ev: dict) -> str:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Удалить события, чей заголовок начинается с префикса (default: 'ПиА')"
+        description="Удалить события, чей заголовок начинается с префикса (default: 'ПИА')"
     )
     ap.add_argument("--calendar", default="primary", help="ID календаря")
-    ap.add_argument("--prefix", default="ПиА", help="С каким префиксом начинается summary")
+    ap.add_argument("--prefix", default="ПИА", help="С каким префиксом начинается summary")
     ap.add_argument("--since", required=True, help="Начало интервала YYYY-MM-DD")
     ap.add_argument("--until", required=True, help="Конец интервала YYYY-MM-DD (включительно)")
     ap.add_argument("--tz", default="Europe/Moscow", help="Таймзона для интервала времени")
