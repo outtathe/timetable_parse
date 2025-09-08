@@ -1,57 +1,71 @@
 # -*- coding: utf-8 -*-
+"""
+CLI: парсер расписания → Google Calendar (ПИА)
+- Только группы БИВТ-25-1..8
+- Лекции: не ставим, если в этот день уже есть любая ПИА-лекция
+- Лабы: не ставим, если на этой дате уже есть лаба этой же группы с тем же стартом
+- Идемпотентность между запусками: extendedProperties.private.xkey
+- Идемпотентность внутри запуска: локальный set
+- UNTIL по умолчанию: конец текущего месяца
+"""
+
 import argparse
 import datetime as dt
 import os
-import pytz
+from typing import Optional, Tuple, List
 
+import pytz
 import xlrd
 
 from .parser import SheetAccessor, find_header_and_week_rows, iter_hits, WEEKDAY_MAP
-from .calendar_logic import build_event, monday_of
+from .calendar_logic import build_event, monday_of, make_xkey
 from .calendar_api import get_gcal_service
 
 
+# ---------- даты / таймзона ----------
 def end_of_current_month() -> dt.date:
     today = dt.date.today()
-    last = (today.replace(day=28) + dt.timedelta(days=4)).replace(day=1) - dt.timedelta(days=1)
-    return last
+    first_next = (today.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    return first_next - dt.timedelta(days=1)
 
+def localize(day: dt.date, t: dt.time, tzname: str) -> dt.datetime:
+    tz = pytz.timezone(tzname)
+    return tz.localize(dt.datetime.combine(day, t))
 
-# --- утилиты для групп ---
-def normalize_group(s: str) -> str:
-    s = (s or "").strip().upper()
-    s = s.replace("—", "-").replace("–", "-").replace(" ", "")
-    return s
+def day_bounds_rfc3339(day: dt.date, tzname: str) -> Tuple[str, str]:
+    tz = pytz.timezone(tzname)
+    tmin = tz.localize(dt.datetime.combine(day, dt.time(0, 0, 0))).isoformat()
+    tmax = tz.localize(dt.datetime.combine(day, dt.time(23, 59, 59))).isoformat()
+    return tmin, tmax
 
-def allowed_group(s: str) -> str | None:
-    """Разрешаем только БИВТ-25-<1..8>."""
-    s = normalize_group(s)
-    if not s.startswith("БИВТ-25-"):
-        return None
-    tail = s.split("-")[-1]
-    try:
-        n = int(tail)
-    except ValueError:
-        return None
-    return s if 1 <= n <= 8 else None
-
-
-# --- даты/проверки в календаре ---
 def compute_first_date(hit, upper_week_monday: dt.date) -> dt.date:
     upper_monday = monday_of(upper_week_monday)
     lower_monday = upper_monday + dt.timedelta(days=7)
     anchor = upper_monday if hit.week == "upper" else lower_monday
     return anchor + dt.timedelta(days=WEEKDAY_MAP[hit.weekday_name])
 
-def day_bounds_rfc3339(day: dt.date, tz: str) -> tuple[str, str]:
-    tzinfo = pytz.timezone(tz)
-    tmin = tzinfo.localize(dt.datetime.combine(day, dt.time(0, 0, 0))).isoformat()
-    tmax = tzinfo.localize(dt.datetime.combine(day, dt.time(23, 59, 59))).isoformat()
-    return tmin, tmax
 
-def lecture_exists_on_date(service, calendar_id: str, day: dt.date, tz: str) -> bool:
-    """Есть ли на этой дате хоть одна 'ПИА — Лекция ...'"""
-    tmin, tmax = day_bounds_rfc3339(day, tz)
+# ---------- группы ----------
+def normalize_group(s: str) -> str:
+    s = (s or "").strip().upper()
+    s = s.replace("—", "-").replace("–", "-").replace(" ", "")
+    return s
+
+def allowed_group(s: str) -> Optional[str]:
+    """Разрешаем только БИВТ-25-<1..8>."""
+    s = normalize_group(s)
+    if not s.startswith("БИВТ-25-"):
+        return None
+    try:
+        n = int(s.split("-")[-1])
+    except ValueError:
+        return None
+    return s if 1 <= n <= 8 else None
+
+
+# ---------- проверки в календаре ----------
+def lecture_exists_on_date(service, calendar_id: str, day: dt.date, tzname: str) -> bool:
+    tmin, tmax = day_bounds_rfc3339(day, tzname)
     resp = service.events().list(
         calendarId=calendar_id,
         timeMin=tmin,
@@ -66,20 +80,94 @@ def lecture_exists_on_date(service, calendar_id: str, day: dt.date, tz: str) -> 
             return True
     return False
 
+def lab_exists_on_date_time(service, calendar_id: str, day: dt.date, tzname: str,
+                            group: str, start_t: dt.time) -> bool:
+    tmin, tmax = day_bounds_rfc3339(day, tzname)
+    resp = service.events().list(
+        calendarId=calendar_id,
+        timeMin=tmin,
+        timeMax=tmax,
+        singleEvents=True,
+        orderBy="startTime",
+        maxResults=2500,
+    ).execute()
+    target_prefix = f"ПИА — Лаба — {normalize_group(group)}"
+    for ev in resp.get("items", []):
+        title = (ev.get("summary") or "").strip().upper()
+        if not title.startswith(target_prefix):
+            continue
+        s_iso = ev.get("start", {}).get("dateTime")
+        if not s_iso:
+            continue
+        try:
+            ev_time = dt.datetime.fromisoformat(s_iso).timetz()
+            if ev_time.hour == start_t.hour and ev_time.minute == start_t.minute:
+                return True
+        except Exception:
+            pass
+    return False
 
+def event_exists_by_xkey(service, calendar_id: str, xkey: str,
+                         start_dt: dt.datetime, end_dt: dt.datetime, debug: bool=False) -> bool:
+    """Ищем событие с тем же extendedProperties.private.xkey в окне ±1 мин."""
+    time_min = (start_dt - dt.timedelta(minutes=1)).isoformat()
+    time_max = (end_dt + dt.timedelta(minutes=1)).isoformat()
+    resp = service.events().list(
+        calendarId=calendar_id,
+        timeMin=time_min,
+        timeMax=time_max,
+        singleEvents=True,
+        orderBy="startTime",
+        maxResults=2500,
+    ).execute()
+    for ev in resp.get("items", []):
+        priv = ev.get("extendedProperties", {}).get("private", {}) or {}
+        if priv.get("xkey") == xkey:
+            if debug:
+                print(f"[DEBUG] matched by xkey {xkey}: {ev.get('summary')} @ {ev.get('start',{}).get('dateTime')}")
+            return True
+        elif debug:
+            print(f"[DEBUG] nearby event: {ev.get('summary')} xkey={priv.get('xkey')}")
+    return False
+
+
+def stream_of(group: str) -> str:
+    try:
+        n = int(group.split("-")[-1])
+    except Exception:
+        return ""
+    return "1-4" if 1 <= n <= 4 else "5-8"
+
+def dedupe_hits(hits):
+    """Дедуп: для лекций ключ без группы (используем поток); для лаб — с группой."""
+    seen = set()
+    out = []
+    for h in hits:
+        room = (h.room or "").strip()
+        if h.lesson_type == "Лекция":
+            key = (h.week, h.weekday_name, h.start, h.end, room, "Лекция", stream_of(h.group))
+        else:  # Лаба
+            key = (h.week, h.weekday_name, h.start, h.end, room, "Лаба", normalize_group(h.group))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
+
+
+
+# ---------- CLI ----------
 def main():
     ap = argparse.ArgumentParser(description="Парсер расписания → Google Calendar (ПИА)")
     ap.add_argument("--file", required=True, help=".xls файл с расписанием")
     ap.add_argument("--calendar", default="primary", help="ID календаря (по умолчанию primary)")
     ap.add_argument("--timezone", default="Europe/Moscow", help="Таймзона для событий")
     ap.add_argument("--upper-start", default="2025-09-01", help="Понедельник верхней недели (YYYY-MM-DD)")
-    ap.add_argument(
-        "--until",
-        default=None,
-        help="Дата окончания повторений включительно (YYYY-MM-DD). По умолчанию — конец текущего месяца.",
-    )
+    ap.add_argument("--until", default=None,
+                    help="Дата окончания повторений включительно (YYYY-MM-DD). По умолчанию — конец текущего месяца.")
     ap.add_argument("--push", action="store_true", help="Создать события в календаре")
     ap.add_argument("--dry-run", action="store_true", help="Только вывести найденное")
+    ap.add_argument("--debug", action="store_true", help="Подробные логи поиска дублей (xkey)")
     args = ap.parse_args()
 
     dry = True if args.dry_run or not args.push else False
@@ -87,6 +175,7 @@ def main():
     if not os.path.exists(args.file):
         raise FileNotFoundError(args.file)
 
+    # читаем xls
     book = xlrd.open_workbook(args.file, formatting_info=True)
     sheet = book.sheet_by_index(0)
     sh = SheetAccessor(sheet)
@@ -94,58 +183,82 @@ def main():
     header_row, week_row = find_header_and_week_rows(sh)
     hits = iter_hits(sh, header_row, week_row)
 
-    # ФИЛЬТРЫ ПО ГРУППАМ: только БИВТ-25-1..8
+    # фильтр по группам + нормализация
     filtered = []
     for h in hits:
         norm = allowed_group(h.group)
         if not norm:
             continue
-        h.group = norm  # нормализуем в объекте
+        h.group = norm
         filtered.append(h)
-    hits = filtered
+
+    # дедуп входных хитов
+    hits = dedupe_hits(filtered)
 
     if not hits:
-        print("Ничего не найдено/подходящего (фильтры по группам БИВТ-25-1..8).")
+        print("Ничего не найдено/подходящего (после фильтров и дедупа).")
         return
 
     upper_start = dt.datetime.strptime(args.upper_start, "%Y-%m-%d").date()
-    until_date = (
-        dt.datetime.strptime(args.until, "%Y-%m-%d").date()
-        if args.until
-        else end_of_current_month()
-    )
+    until_date = dt.datetime.strptime(args.until, "%Y-%m-%d").date() if args.until else end_of_current_month()
 
-    # Предварительная сводка
-    print('Пары к обработке (["ПИА" - "Лекция/Лаба" - "Аудитория/Группа"]):')
+    print('К созданию (после фильтров/дедупа):')
     for h in hits:
         tail = f'{h.group} - "{h.room}"' if h.lesson_type == "Лаба" else f'"{h.room}"'
-        print(f'["ПИА" - "{h.lesson_type}" - {tail}] — {h.weekday_name} {h.start.strftime("%H:%M")}-{h.end.strftime("%H:%M")} ({ "верхняя" if h.week=="upper" else "нижняя"})')
+        print(f'["ПИА" - "{h.lesson_type}" - {tail}] — {h.weekday_name} '
+              f'{h.start.strftime("%H:%M")}-{h.end.strftime("%H:%M")} '
+              f'({ "верхняя" if h.week=="upper" else "нижняя"})')
 
     if dry:
         print("\nDRY-RUN: события НЕ создаются. Добавь --push чтобы залить в календарь.")
         return
 
     service = get_gcal_service()
+    created = skipped_lectures = skipped_labs = skipped_dups = 0
+    created_keys = set()  # локальная идемпотентность на текущий запуск
 
-    # Создаём события с проверкой 'лекция уже есть в этот день'
-    created = 0
-    skipped_lectures = 0
     for h in hits:
-        # пропускаем лекцию, если уже есть любая ПИА-лекция на этой дате
-        if h.lesson_type == "Лекция":
-            first_date = compute_first_date(h, upper_start)
-            if lecture_exists_on_date(service, args.calendar, first_date, args.timezone):
-                print(f"[SKIP] Лекция уже есть на {first_date.isoformat()}")
-                skipped_lectures += 1
-                continue
+        first_date = compute_first_date(h, upper_start)
+        start_dt = localize(first_date, h.start, args.timezone)
+        end_dt   = localize(first_date, h.end,   args.timezone)
+
+        # лекцию в день не дублируем
+        if h.lesson_type == "Лекция" and lecture_exists_on_date(service, args.calendar, first_date, args.timezone):
+            print(f"[SKIP] Лекция уже есть на {first_date.isoformat()}")
+            skipped_lectures += 1
+            continue
+
+        # cтабильный ключ пары
+        xkey = make_xkey(h)
+        local_key = (xkey, first_date.isoformat())
+
+        # 0) локальная идемпотентность
+        if local_key in created_keys:
+            print(f"[SKIP] Локальный дубль xkey={xkey} {start_dt.isoformat()}")
+            skipped_dups += 1
+            continue
+
+        # 1) дубль по xkey уже в календаре?
+        if event_exists_by_xkey(service, args.calendar, xkey, start_dt, end_dt, debug=args.debug):
+            print(f"[SKIP] Уже существует (xkey): {h.lesson_type} {h.group} {start_dt.isoformat()}")
+            skipped_dups += 1
+            continue
+
+        # 2) защита для лаб: та же группа и старт уже есть
+        if h.lesson_type == "Лаба" and lab_exists_on_date_time(service, args.calendar, first_date, args.timezone, h.group, h.start):
+            print(f"[SKIP] Лаба {h.group} уже есть {first_date.isoformat()} {h.start.strftime('%H:%M')}")
+            skipped_labs += 1
+            continue
 
         ev = build_event(h, args.timezone, upper_start, until_date)
         service.events().insert(calendarId=args.calendar, body=ev).execute()
+        created_keys.add(local_key)
         print(f'[OK] {ev["summary"]} {ev["start"]["dateTime"]}')
         created += 1
 
-    print(f"\nИтог: создано {created}, пропущено лекций {skipped_lectures}.")
-    
+    print(f"\nИтог: создано {created}, пропущено лекций {skipped_lectures}, "
+          f"пропущено лаб {skipped_labs}, точных дублей (xkey) {skipped_dups}.")
+
 
 if __name__ == "__main__":
     main()
