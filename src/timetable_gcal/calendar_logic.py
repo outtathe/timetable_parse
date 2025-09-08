@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import datetime as dt
 from typing import Dict
-
 import pytz
 
 from .parser import Hit, WEEKDAY_MAP
@@ -23,7 +22,12 @@ def build_event(hit: Hit, tz: str, upper_week_monday: dt.date, until_date: dt.da
 
     until_utc = pytz.UTC.localize(dt.datetime.combine(until_date, dt.time(23, 59, 59)))
 
-    summary = f"ПИА — {hit.lesson_type} — {hit.room or 'Аудитория?'}"
+    # ⬇️ ключевое изменение: для ЛАБ добавляем группу
+    if hit.lesson_type == "Лаба":
+        summary = f"ПИА — Лаба — {hit.group} — {hit.room or 'Аудитория?'}"
+    else:
+        summary = f"ПИА — Лекция — {hit.room or 'Аудитория?'}"
+
     description = f"Группа: {hit.group}\nНеделя: {'верхняя' if hit.week=='upper' else 'нижняя'}"
 
     return {
