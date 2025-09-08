@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 timetable-to-gcal = "timetable_gcal.cli:main"
+timetable-add-one = "timetable_gcal.quick_add:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
