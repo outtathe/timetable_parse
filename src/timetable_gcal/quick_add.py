@@ -1,40 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-timetable-add-one: минимальная команда для добавления ОДНОГО события в календарь.
-Устанавливается вместе с проектом и работает после `pip install -e .`.
+Мини-CLI: добавить одно событие в календарь через единый модуль event_create.add_event.
+Пример:
+  python -m timetable_gcal.quick_add \
+    --title "Проба" --date 2025-09-01 --start 10:00 --end 11:00 \
+    --tz Europe/Moscow --location "Л-550" --calendar primary
 """
 import argparse
-import datetime as dt
 
-from .calendar_api import get_gcal_service
+from .event_create import add_event
 
 def main():
-    ap = argparse.ArgumentParser(description="Добавить одно событие в Google Calendar (минимально)")
-    ap.add_argument("--title", default="Тестовое событие")
-    ap.add_argument("--date", help="YYYY-MM-DD (по умолчанию — завтра)")
-    ap.add_argument("--start", default="10:00", help="HH:MM")
-    ap.add_argument("--end", default="11:00", help="HH:MM")
-    ap.add_argument("--tz", default="Europe/Moscow", help="Таймзона")
-    ap.add_argument("--calendar", default="primary", help="ID календаря")
+    ap = argparse.ArgumentParser(description="Добавить одно событие в Google Calendar")
+    ap.add_argument("--title", required=True, help="Название события")
+    ap.add_argument("--date", required=True, help="Дата YYYY-MM-DD")
+    ap.add_argument("--start", required=True, help="Начало: HH:MM или ISO datetime")
+    ap.add_argument("--end", required=True, help="Конец: HH:MM или ISO datetime")
+    ap.add_argument("--tz", default="Europe/Moscow", help="Таймзона (например, Europe/Moscow)")
+    ap.add_argument("--calendar", default="primary", help="ID календаря (по умолчанию primary)")
+    ap.add_argument("--location", default="", help="Место/аудитория")
+    ap.add_argument("--description", default="", help="Описание (опционально)")
+    ap.add_argument("--color-id", default=None, help="colorId из палитры Google Calendar (1..11)")
     args = ap.parse_args()
 
-    # дата по умолчанию — завтра
-    if args.date:
-        day = dt.datetime.strptime(args.date, "%Y-%m-%d").date()
-    else:
-        day = dt.date.today() + dt.timedelta(days=1)
-
-    h1, m1 = map(int, args.start.split(":"))
-    h2, m2 = map(int, args.end.split(":"))
-    start_dt = dt.datetime.combine(day, dt.time(h1, m1))
-    end_dt = dt.datetime.combine(day, dt.time(h2, m2))
-
-    body = {
-        "summary": args.title,
-        "start": {"dateTime": start_dt.isoformat(), "timeZone": args.tz},
-        "end": {"dateTime": end_dt.isoformat(), "timeZone": args.tz},
-    }
-
-    service = get_gcal_service()
-    created = service.events().insert(calendarId=args.calendar, body=body).execute()
+    created = add_event(
+        title=args.title,
+        date=args.date,
+        start=args.start,
+        end=args.end,
+        tz=args.tz,
+        calendar=args.calendar,
+        location=args.location,
+        description=args.description,
+        color_id=args.color_id,
+    )
     print("OK:", created.get("htmlLink", "<без ссылки>"))
+
+if __name__ == "__main__":
+    main()

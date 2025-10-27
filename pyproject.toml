@@ -3,9 +3,9 @@ requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "timetable-to-gcal"
-version = "0.3.7"
-description = "Парсер расписания .XLS (ПИА) с загрузкой в Google Calendar"
+name = "timetable-gcal"
+version = "0.4.0"
+description = "Мини-CLI для добавления событий в Google Calendar (единый модуль add_event)"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{ name = "You" }]
@@ -14,15 +14,11 @@ dependencies = [
     "google-api-python-client>=2.130.0",
     "google-auth-httplib2>=0.2.0",
     "google-auth-oauthlib>=1.2.0",
-    "python-dateutil>=2.9.0",
     "pytz>=2024.1",
-    "xlrd==1.2.0",
 ]
 
 [project.scripts]
-timetable-to-gcal = "timetable_gcal.cli:main"
-timetable-add-one = "timetable_gcal.quick_add:main"
-timetable-purge   = "timetable_gcal.purge:main" 
+timetable-gcal = "timetable_gcal.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
